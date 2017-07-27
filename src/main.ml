@@ -15,8 +15,30 @@
 let project_url = "http://github.com/djs55/xapi-nbd"
 
 open Lwt
+
 (* Xapi external interfaces: *)
-module Xen_api = Xen_api_lwt_unix
+module XAPI = struct
+
+  let localhost_ip = "127.0.0.1"
+
+  (* Options *)
+  let delay = ref 120.
+
+  include Client
+
+  let rpc xml =
+    let open Xmlrpc_client in
+    let http = xmlrpc ~version:"1.0" "/" in
+    XMLRPC_protocol.rpc ~srcstr:"xapi-nbd" ~dststr:"xapi" 
+      ~transport:(Unix (Filename.concat "/var/lib/xcp" "xapi")) ~http xml
+
+  let with_session f =
+    Lwt.wrap (fun () -> Client.Session.login_with_password ~rpc ~uname:"" ~pwd:"" ~version:"1.4" ~originator:"rrd2csv") >>= fun session_id ->
+    Lwt.finalize
+      (fun () -> f session_id)
+      (fun () -> Lwt.wrap (fun () -> Client.Session.logout ~rpc ~session_id))
+
+end
 
 (* Xapi internal interfaces: *)
 module SM = Storage_interface.ClientM(struct
@@ -44,8 +66,6 @@ module SM = Storage_interface.ClientM(struct
     >>*= fun result ->
     return (Jsonrpc.response_of_string result)
 end)
-
-let uri = ref "http://127.0.0.1/"
 
 let capture_exception f x =
   Lwt.catch
@@ -88,28 +108,6 @@ let ignore_exn t () = Lwt.catch t (fun _ -> Lwt.return_unit)
 
 let handle_connection fd =
 
-  let with_session rpc uri f =
-    ( match Uri.user uri, Uri.password uri, Uri.get_query_param uri "session_id" with
-      | _, _, Some x ->
-        (* Validate the session *)
-        Xen_api.Session.get_uuid ~rpc ~session_id:x ~self:x
-        >>= fun _ ->
-        return (x, false)
-      | Some uname, Some pwd, _ ->
-        Xen_api.Session.login_with_password ~rpc ~uname ~pwd ~version:"1.0" ~originator:"xapi-nbd"
-        >>= fun session_id ->
-        return (session_id, true)
-      | _, _, _ ->
-        fail (Failure "No suitable authentication provided")
-    ) >>= fun (session_id, need_to_logout) ->
-    Lwt.finalize
-      (fun () -> f session_id)
-      (fun () ->
-         if need_to_logout
-         then Xen_api.Session.logout ~rpc ~session_id
-         else return ())
-  in
-
   let channel = Nbd_lwt_unix.of_fd fd in
   Lwt.finalize
     (fun () ->
@@ -117,18 +115,15 @@ let handle_connection fd =
        >>= fun (export_name, t) ->
        Lwt.finalize
          (fun () ->
-            let rpc = Xen_api.make !uri in
             let uri = Uri.of_string export_name in
-            with_session rpc uri
+            XAPI.with_session
               (fun session_id ->
                  let path = Uri.path uri in (* note preceeding / *)
                  let vdi_uuid = if path <> "" then String.sub path 1 (String.length path - 1) else path in
-                 Xen_api.VDI.get_by_uuid ~rpc ~session_id ~uuid:vdi_uuid
-                 >>= fun vdi_ref ->
-                 Xen_api.VDI.get_record ~rpc ~session_id ~self:vdi_ref
-                 >>= fun vdi_rec ->
-                 Xen_api.SR.get_uuid ~rpc ~session_id ~self:vdi_rec.API.vDI_SR
-                 >>= fun sr_uuid ->
+                 let rpc = XAPI.rpc in
+                 let vdi_ref = XAPI.Client.VDI.get_by_uuid ~rpc ~session_id ~uuid:vdi_uuid in
+                 let vdi_rec = XAPI.Client.VDI.get_record ~rpc ~session_id ~self:vdi_ref in
+                 let sr_uuid = XAPI.Client.SR.get_uuid ~rpc ~session_id ~self:vdi_rec.API.vDI_SR in
                  with_attached_vdi sr_uuid vdi_rec.API.vDI_location (not vdi_rec.API.vDI_read_only)
                    (fun filename ->
                       with_block filename (Nbd_lwt_unix.Server.serve t (module Block))

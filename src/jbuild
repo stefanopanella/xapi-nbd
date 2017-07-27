@@ -12,6 +12,6 @@
     nbd.lwt
     uri
     xcp.storage
-    xen-api-client.lwt))
+    xapi-client))
  )
 )
