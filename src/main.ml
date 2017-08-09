@@ -49,8 +49,13 @@ let uri = ref "http://127.0.0.1/"
 
 let capture_exception f x =
   Lwt.catch
-    (fun () -> f x >>= fun r -> return (`Ok r))
-    (fun e -> return (`Error e))
+    (fun () ->
+      f x >>= fun r ->
+      Lwt_io.printl "capture_exception did not catch exception" >>= fun () ->
+      return (`Ok r))
+    (fun e ->
+      Lwt_io.printl "capture_exception caught exception" >>= fun () ->
+      return (`Error e))
 
 let release_exception = function
   | `Ok x -> return x
@@ -58,12 +63,14 @@ let release_exception = function
 
 let with_block filename f =
   let open Lwt in
+  Lwt_io.printl "Block.connect filename" >>= fun () ->
   Block.connect filename
   >>= function
   | `Error _ -> fail (Failure (Printf.sprintf "Unable to read %s" filename))
   | `Ok x ->
     capture_exception f x
     >>= fun r ->
+    Lwt_io.printl "Block.disconnect x" >>= fun () ->
     Block.disconnect x
     >>= fun () ->
     release_exception r
@@ -71,14 +78,18 @@ let with_block filename f =
 let with_attached_vdi sr vdi read_write f =
   let pid = Unix.getpid () in
   let dbg = Printf.sprintf "xapi-nbd:with_attached_vdi/%d" pid in
+  Lwt_io.printl "SM.DP.create ~dbg ~id:(Printf.sprintf \"xapi-nbd/%s/%d\" vdi pid)" >>= fun () ->
   SM.DP.create ~dbg ~id:(Printf.sprintf "xapi-nbd/%s/%d" vdi pid)
   >>= fun dp ->
+  Lwt_io.printl "SM.VDI.attach ~dbg ~dp ~sr ~vdi ~read_write" >>= fun () ->
   SM.VDI.attach ~dbg ~dp ~sr ~vdi ~read_write
   >>= fun attach_info ->
+  Lwt_io.printl "SM.VDI.activate ~dbg ~dp ~sr ~vdi" >>= fun () ->
   SM.VDI.activate ~dbg ~dp ~sr ~vdi
   >>= fun () ->
   capture_exception f attach_info.Storage_interface.params
   >>= fun r ->
+  Lwt_io.printl "SM.DP.destroy ~dbg ~dp ~allow_leak:true" >>= fun () ->
   SM.DP.destroy ~dbg ~dp ~allow_leak:true
   >>= fun () ->
   release_exception r
@@ -92,10 +103,12 @@ let handle_connection fd =
     ( match Uri.user uri, Uri.password uri, Uri.get_query_param uri "session_id" with
       | _, _, Some x ->
         (* Validate the session *)
+        Lwt_io.printl "Xen_api.Session.get_uuid ~rpc ~session_id:x ~self:x" >>= fun () ->
         Xen_api.Session.get_uuid ~rpc ~session_id:x ~self:x
         >>= fun _ ->
         return (x, false)
       | Some uname, Some pwd, _ ->
+        Lwt_io.printl "Xen_api.Session.login_with_password ~rpc ~uname ~pwd ~version:\"1.0\" ~originator:\"xapi-nbd\"" >>= fun () ->
         Xen_api.Session.login_with_password ~rpc ~uname ~pwd ~version:"1.0" ~originator:"xapi-nbd"
         >>= fun session_id ->
         return (session_id, true)
@@ -106,7 +119,9 @@ let handle_connection fd =
       (fun () -> f uri rpc session_id)
       (fun () ->
          if need_to_logout
-         then Xen_api.Session.logout ~rpc ~session_id
+         then
+         Lwt_io.printl "Xen_api.Session.logout ~rpc ~session_id" >>= fun () ->
+         Xen_api.Session.logout ~rpc ~session_id
          else return ())
   in
 
@@ -114,10 +129,13 @@ let handle_connection fd =
   let serve t uri rpc session_id =
     let path = Uri.path uri in (* note preceeding / *)
     let vdi_uuid = if path <> "" then String.sub path 1 (String.length path - 1) else path in
+    Lwt_io.printl "Xen_api.VDI.get_by_uuid ~rpc ~session_id ~uuid:vdi_uuid" >>= fun () ->
     Xen_api.VDI.get_by_uuid ~rpc ~session_id ~uuid:vdi_uuid
     >>= fun vdi_ref ->
+    Lwt_io.printl "Xen_api.VDI.get_record ~rpc ~session_id ~self:vdi_ref" >>= fun () ->
     Xen_api.VDI.get_record ~rpc ~session_id ~self:vdi_ref
     >>= fun vdi_rec ->
+    Lwt_io.printl "Xen_api.SR.get_uuid ~rpc ~session_id ~self:vdi_rec.API.vDI_SR" >>= fun () ->
     Xen_api.SR.get_uuid ~rpc ~session_id ~self:vdi_rec.API.vDI_SR
     >>= fun sr_uuid ->
     with_attached_vdi sr_uuid vdi_rec.API.vDI_location (not vdi_rec.API.vDI_read_only)
@@ -154,6 +172,7 @@ let main port =
          let rec loop () =
            Lwt_unix.accept sock
            >>= fun (fd, _) ->
+           Lwt_io.printl "Got new client" >>= fun () ->
            (* Background thread per connection *)
            let _ =
              Lwt.catch
@@ -193,7 +212,7 @@ let cmd =
   let man = [
     `S "DESCRIPTION";
     `P "Expose all accessible VDIs over NBD. Every VDI is addressible through a URI, where the URI will be authenticated by xapi.";
-  ] @ help in
+] @ help in
   let port =
     let doc = "Local port to listen for connections on" in
     Arg.(value & opt int 10809 & info [ "port" ] ~doc) in
