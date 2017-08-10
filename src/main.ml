@@ -78,8 +78,9 @@ let with_block filename f =
 let with_attached_vdi sr vdi read_write f =
   let pid = Unix.getpid () in
   let dbg = Printf.sprintf "xapi-nbd:with_attached_vdi/%d" pid in
-  Lwt_io.printl "SM.DP.create ~dbg ~id:(Printf.sprintf \"xapi-nbd/%s/%d\" vdi pid)" >>= fun () ->
-  SM.DP.create ~dbg ~id:(Printf.sprintf "xapi-nbd/%s/%d" vdi pid)
+  let connection_id = Random.bits () in
+  Lwt_io.printl "SM.DP.create ~dbg ~id:(Printf.sprintf \"xapi-nbd/%s/%d/%d\" vdi connection_id pid)" >>= fun () ->
+  SM.DP.create ~dbg ~id:(Printf.sprintf "xapi-nbd/%s/%d/%d" vdi connection_id pid)
   >>= fun dp ->
   Lwt_io.printl "SM.VDI.attach ~dbg ~dp ~sr ~vdi ~read_write" >>= fun () ->
   SM.VDI.attach ~dbg ~dp ~sr ~vdi ~read_write
@@ -161,6 +162,7 @@ let handle_connection fd =
     (ignore_exn channel.close)
 
 let main port =
+  Random.self_init ();
   let t =
     let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
     Lwt.finalize
