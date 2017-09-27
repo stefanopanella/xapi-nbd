@@ -16,6 +16,23 @@ open Lwt.Infix
 (* Xapi external interfaces: *)
 module Xen_api = Xen_api_lwt_unix
 
+let cancellable t =
+  let waiter,_wakener = Lwt.task () in
+  Lwt.pick [t (); waiter]
+
+let client_threads = ref []
+
+let cancel_on_signal: ((unit -> unit Lwt.t) -> (unit -> unit Lwt.t)) = begin
+  let waiter,wakener = Lwt.wait () in
+  Sys.([sigint; sigterm])
+  |> List.iter (fun signal ->
+      Lwt_unix.on_signal
+        signal
+        (fun signal -> Lwt.wakeup_exn wakener (Failure (Printf.sprintf "Caught signal %d" signal)))
+      |> ignore);
+  (fun t () -> Lwt.pick [t (); waiter])
+end
+
 (* TODO share these "require" functions with the nbd package. *)
 let require name arg = match arg with
   | None -> failwith (Printf.sprintf "Please supply a %s argument" name)
@@ -50,15 +67,18 @@ let with_attached_vdi vDI read_write rpc session_id f =
       >>= fun () ->
       Lwt.finalize
       (fun () ->
+        cancellable (fun () ->
         Xen_api.VBD.get_device ~rpc ~session_id ~self:vbd
         >>= fun device ->
-        f ("/dev/" ^ device))
-      (fun () -> Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd))
+        f ("/dev/" ^ device)))
+      (fun () ->
+         Lwt_log.notice_f "Unplugging VBD %s" vbd >>= fun () ->
+         Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd))
     (fun () ->
       Lwt_log.notice_f "Destroying VBD %s" vbd >>= fun () ->
       Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd)
 
-let ignore_exn t () = Lwt.catch t (fun _ -> Lwt.return_unit)
+let ignore_exn t = Lwt.catch t (fun _ -> Lwt.return_unit)
 
 let handle_connection xen_api_uri fd tls_role =
 
@@ -129,30 +149,42 @@ let main port xen_api_uri certfile ciphersuites no_tls =
            >>= fun (fd, _) ->
            Lwt_log.notice "Got new client" >>= fun () ->
            (* Background thread per connection *)
-           let _ =
+           let t =
              Lwt.catch
                (fun () ->
                   Lwt.finalize
                     (fun () -> handle_connection xen_api_uri fd tls_role)
                     (* ignore the exception resulting from double-closing the socket *)
-                    (ignore_exn (fun () -> Lwt_unix.close fd))
+                    (fun () -> ignore_exn (fun () -> Lwt_unix.close fd))
                )
                (fun e -> Lwt_log.error_f "Caught exception while handling client: %s" (Printexc.to_string e))
            in
+           client_threads := t :: !client_threads;
            loop ()
          in
          loop ()
+         >>= fun () ->
+         Lwt.join !client_threads
       )
-      (ignore_exn (fun () -> Lwt_unix.close sock))
+      (fun () ->
+         Lwt_log.notice_f "Caught exception XXXX" >>= fun () ->
+         Lwt_log.notice_f "Closed socket XXXX" >>= fun () ->
+         List.iter (fun t -> Lwt.cancel t) !client_threads;
+         Lwt_log.notice_f "XXXX cancelled all threads"
+      )
   in
   (* Log unexpected exceptions *)
-  Lwt_main.run
+  let t () =
     (Lwt.catch t
        (fun e ->
           Lwt_log.fatal_f "Caught unexpected exception: %s" (Printexc.to_string e) >>= fun () ->
           Lwt.fail e
        )
-    );
+    )
+  in
+  (* Terminate the program but do the cleanups on SIGTERM *)
+  let t = cancel_on_signal t in
+  Lwt_main.run (t ());
 
   `Ok ()
 
