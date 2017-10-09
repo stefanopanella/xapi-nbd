@@ -97,6 +97,7 @@ let handle_connection xen_api_uri fd tls_role =
     ( match Uri.get_query_param uri "session_id" with
       | Some session_id ->
         (* Validate the session *)
+        let session_id = API.Ref.of_string session_id in
         Xen_api.Session.get_uuid ~rpc ~session_id ~self:session_id
         >>= fun _ ->
         Lwt.return session_id
