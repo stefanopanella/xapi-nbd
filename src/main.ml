@@ -121,6 +121,9 @@ let main port certfile ciphersuites =
       (fun () ->
          Lwt_log.notice "Setting up server socket" >>= fun () ->
          Lwt_unix.setsockopt sock Lwt_unix.SO_REUSEADDR true;
+         (* Use a timeout of 5 minutes for input operations *)
+         Lwt_unix.setsockopt_float sock Lwt_unix.SO_RCVTIMEO (15.0);
+         Lwt_unix.setsockopt_float sock Lwt_unix.SO_SNDTIMEO (15.0);
          let sockaddr = Lwt_unix.ADDR_INET(Unix.inet_addr_any, port) in
          Lwt_unix.bind sock sockaddr;
          Lwt_unix.listen sock 5;
@@ -129,6 +132,9 @@ let main port certfile ciphersuites =
            Lwt_unix.accept sock
            >>= fun (fd, _) ->
            Lwt_log.notice "Got new client" >>= fun () ->
+           (* Use a timeout of 5 minutes for input operations *)
+           Lwt_unix.setsockopt_float fd Lwt_unix.SO_RCVTIMEO (15.0);
+           Lwt_unix.setsockopt_float fd Lwt_unix.SO_SNDTIMEO (15.0);
            (* Background thread per connection *)
            let _ =
              ignore_exn_log_error "Caught exception while handling client"
