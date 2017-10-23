@@ -18,14 +18,10 @@ module Make(Config : sig
     Lwt.fail e
 
   let create_dir_if_doesnt_exist () =
-    Lwt.catch
-      (fun () -> Lwt_unix.mkdir vbd_list_dir 0o755)
-      (function
-        | Unix.(Unix_error (EEXIST, "mkdir", dir)) when dir = vbd_list_dir -> Lwt.return_unit
-        | e ->
-          (* In any other case we let the client fail. In this case the user/admin should go and fix the root cause of the issue *)
-          log_and_reraise_error ("Failed to create directory " ^ vbd_list_dir) e
-      )
+    try%lwt
+      Lwt_unix.mkdir vbd_list_dir 0o755
+    with
+    | Unix.(Unix_error (EEXIST, "mkdir", dir)) when dir = vbd_list_dir -> Lwt.return_unit
 
   let transform_vbd_list f =
     Lwt_mutex.with_lock m (fun () ->
@@ -36,19 +32,13 @@ module Make(Config : sig
            overwrite the original file with duplicate entries. Instead, we read
            the whole stream into a list here to ensure the file gets closed. *)
         let%lwt l =
-          Lwt.catch
-            (fun () -> Lwt_io.lines_of_file vbd_list_file |> Lwt_stream.to_list)
-            (function
-              | Unix.(Unix_error (ENOENT, "open", file)) when file = vbd_list_file -> Lwt.return []
-              | e ->
-                (* In any other case we let the client fail. In this case the user/admin should go and fix the root cause of the issue *)
-                log_and_reraise_error ("Failed to read file " ^ vbd_list_file) e
-            )
+          try%lwt
+            Lwt_io.lines_of_file vbd_list_file |> Lwt_stream.to_list
+          with
+          | Unix.(Unix_error (ENOENT, "open", file)) when file = vbd_list_file -> Lwt.return []
         in
         let l = f l in
-        Lwt.catch
-          (fun () -> Lwt_stream.of_list l |> Lwt_io.lines_to_file vbd_list_file)
-          (log_and_reraise_error ("Failed to write to " ^ vbd_list_file))
+        Lwt_stream.of_list l |> Lwt_io.lines_to_file vbd_list_file
       )
 
   let add vbd_uuid =
@@ -66,9 +56,7 @@ module Make(Config : sig
     let%lwt exists = Lwt_unix.file_exists vbd_list_file in
     if exists then
       Lwt_mutex.with_lock m (fun () ->
-          Lwt.catch
-            (fun () -> Lwt_io.lines_of_file vbd_list_file |> Lwt_stream.to_list)
-            (log_and_reraise_error ("Failed to read " ^ vbd_list_file))
+          Lwt_io.lines_of_file vbd_list_file |> Lwt_stream.to_list
         )
     else
       Lwt.return []

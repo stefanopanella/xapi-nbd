@@ -16,7 +16,7 @@ open Lwt.Infix
 
 module Xen_api = Xen_api_lwt_unix
 
-let ignore_exn_log_error msg t = Lwt.catch t (fun e -> Lwt_log.error (msg ^ ": " ^ (Printexc.to_string e)))
+let ignore_exn_log_error msg t = try%lwt (t ()) with e -> Lwt_log.error (msg ^ ": " ^ (Printexc.to_string e) ^ "\n" ^ (Printexc.get_backtrace ()))
 
 module VBD = struct
   module StringSet = Set.Make(String)
@@ -74,9 +74,7 @@ module VBD = struct
       in
       Xen_api.VBD.get_uuid ~rpc ~session_id ~self:vbd >>*= fun vbd_uuid ->
       Vbd_store.add vbd_uuid >>*= fun () ->
-      Lwt.finalize
-        f
-        (fun () -> Vbd_store.remove vbd_uuid)
+      (f ()) [%lwt.finally Vbd_store.remove vbd_uuid]
 
     let cleanup rpc session_id =
       let%lwt () = Lwt_log.notice_f "Checking if there are any VBDs to clean up that leaked during the previous run" in
@@ -86,15 +84,13 @@ module VBD = struct
            ignore_exn_log_error (Printf.sprintf "Caught exception while cleaning up VBD with UUID %s" uuid) (fun () ->
                let%lwt () = Lwt_log.warning_f "Cleaning up VBD with UUID %s" uuid in
                let%lwt () =
-                 Lwt.catch
-                   (fun () ->
-                      let%lwt vbd = Xen_api.VBD.get_by_uuid ~rpc ~session_id ~uuid in
-                      cleanup_vbd rpc session_id vbd)
-                   (function
-                     | Api_errors.Server_error (e, _) when e = Api_errors.uuid_invalid ->
-                       (* This VBD has already been cleaned up, maybe by the signal handler *)
-                       Lwt.return_unit
-                     | e -> Lwt.fail e)
+                 try%lwt
+                   let%lwt vbd = Xen_api.VBD.get_by_uuid ~rpc ~session_id ~uuid in
+                   cleanup_vbd rpc session_id vbd
+                 with
+                 | Api_errors.Server_error (e, _) when e = Api_errors.uuid_invalid ->
+                   (* This VBD has already been cleaned up, maybe by the signal handler *)
+                   Lwt.return_unit
                in
                Vbd_store.remove uuid
              )
@@ -106,20 +102,14 @@ module VBD = struct
     let%lwt vbd = Xen_api.VBD.create ~rpc ~session_id ~vM ~vDI ~userdevice:"autodetect" ~bootable:false ~mode ~_type:`Disk ~unpluggable:true ~empty:false ~other_config:[] ~qos_algorithm_type:"" ~qos_algorithm_params:[] in
     Persistent.with_tracking rpc session_id vbd (fun () ->
         Runtime.with_tracking rpc session_id vbd (fun () ->
-            Lwt.finalize
-              (fun () ->
+              (
                  let%lwt () = Lwt_log.notice_f "Plugging VBD %s" (API.Ref.string_of vbd) in
                  let%lwt () = Xen_api.VBD.plug ~rpc ~session_id ~self:vbd in
-                 Lwt.finalize
-                   (fun () -> f vbd)
-                   (fun () ->
-                      let%lwt () = Lwt_log.notice_f "Unplugging VBD %s" (API.Ref.string_of vbd) in
-                      Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd)
-              )
-              (fun () ->
-                 let%lwt () = Lwt_log.notice_f "Destroying VBD %s" (API.Ref.string_of vbd) in
-                 Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd
-              )
+                 (f vbd) [%lwt.finally (let%lwt () = Lwt_log.notice_f "Unplugging VBD %s" (API.Ref.string_of vbd) in
+                                        Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd)]
+              ) [%lwt.finally
+                 (let%lwt () = Lwt_log.notice_f "Destroying VBD %s" (API.Ref.string_of vbd) in
+                  Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd) ]
           )
       )
 end
@@ -135,12 +125,9 @@ module Block = struct
         Lwt_mutex.with_lock blocks_to_close_mutex (fun () ->
             Hashtbl.add blocks_to_close block_uuid b; Lwt.return_unit)
       in
-      Lwt.finalize
-        f
-        (fun () ->
-           Lwt_mutex.with_lock blocks_to_close_mutex (fun () ->
-               Hashtbl.remove blocks_to_close block_uuid; Lwt.return_unit)
-        )
+      (f ()) [%lwt.finally
+           (Lwt_mutex.with_lock blocks_to_close_mutex (fun () ->
+            Hashtbl.remove blocks_to_close block_uuid; Lwt.return_unit))]
 
     let cleanup () =
       let cleanup b = ignore_exn_log_error "Caught exception while closing open block device" (fun () ->
@@ -157,9 +144,7 @@ module Block = struct
     | `Error e -> Lwt.fail_with (Printf.sprintf "Unable to read %s: %s" filename (Nbd.Block_error_printer.to_string e))
     | `Ok b ->
       Runtime.with_tracking b (fun () ->
-          Lwt.finalize
-            (fun () -> f b)
-            (fun () -> Block.disconnect b)
+          (f b) [%lwt.finally (Block.disconnect b)]
         )
 end
 

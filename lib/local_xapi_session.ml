@@ -19,13 +19,13 @@ module Xen_api = Xen_api_lwt_unix
 let wait_for_xapi_and_login () =
   let rpc = Xen_api.make Consts.xapi_unix_domain_socket_uri in
   let rec loop () =
-    Lwt.catch
-      (fun () -> Xen_api.Session.login_with_password ~rpc ~uname:"" ~pwd:"" ~version:"1.0" ~originator:"xapi-nbd")
-      (fun e ->
-         let%lwt () = Lwt_log.warning_f "Failed to log in via xapi's Unix domain socket: %s; retrying in %f seconds" (Printexc.to_string e) Consts.wait_for_xapi_retry_delay_seconds in
-         let%lwt () = Lwt_unix.sleep Consts.wait_for_xapi_retry_delay_seconds in
-         loop ()
-      )
+    try%lwt
+      Xen_api.Session.login_with_password ~rpc ~uname:"" ~pwd:"" ~version:"1.0" ~originator:"xapi-nbd"
+    with
+    | e ->
+       let%lwt () = Lwt_log.warning_f "Failed to log in via xapi's Unix domain socket: %s; retrying in %f seconds" (Printexc.to_string e) Consts.wait_for_xapi_retry_delay_seconds in
+       let%lwt () = Lwt_unix.sleep Consts.wait_for_xapi_retry_delay_seconds in
+       loop ()
   in
 
   let timeout () =
@@ -42,6 +42,4 @@ let wait_for_xapi_and_login () =
 
 let with_session f =
   let%lwt (rpc, session_id) = wait_for_xapi_and_login () in
-  Lwt.finalize
-    (fun () -> f rpc session_id)
-    (fun () -> Xen_api.Session.logout ~rpc ~session_id)
+  (f rpc session_id) [%lwt.finally Xen_api.Session.logout ~rpc ~session_id]

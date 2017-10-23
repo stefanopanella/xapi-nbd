@@ -16,7 +16,7 @@ open Lwt.Infix
 (* Xapi external interfaces: *)
 module Xen_api = Xen_api_lwt_unix
 
-let ignore_exn_delayed t () = Lwt.catch t (fun _ -> Lwt.return_unit)
+let ignore_exn_delayed t = try%lwt (t ()) with _ -> Lwt.return_unit
 let ignore_exn_log_error = Cleanup.ignore_exn_log_error
 
 (* TODO share these "require" functions with the nbd package. *)
@@ -113,8 +113,7 @@ let main port certfile ciphersuites =
     let%lwt () = Lwt_log.notice "Initialising TLS" in
     let tls_server_role = init_tls_get_server_ctx ~certfile ~ciphersuites in
     let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-    Lwt.finalize
-      (fun () ->
+      (
          let%lwt () = Lwt_log.notice "Setting up server socket" in
          Lwt_unix.setsockopt sock Lwt_unix.SO_REUSEADDR true;
          let sockaddr = Lwt_unix.ADDR_INET(Unix.inet_addr_any, port) in
@@ -128,30 +127,21 @@ let main port certfile ciphersuites =
            let _ =
              ignore_exn_log_error "Caught exception while handling client"
                (fun () ->
-                  Lwt.finalize
-                    (fun () -> (
+                    (* ignore the exception resulting from double-closing the socket *)
+                    (
                       let%lwt tls = xapi_says_use_tls () in
                       let tls_role = if tls then tls_server_role else None in
-                      handle_connection fd tls_role)
-                    )
-                    (* ignore the exception resulting from double-closing the socket *)
-                    (ignore_exn_delayed (fun () -> Lwt_unix.close fd))
+                      handle_connection fd tls_role
+                    ) [%lwt.finally (ignore_exn_delayed (fun () -> Lwt_unix.close fd))]
                )
            in
            loop ()
          in
          loop ()
-      )
-      (ignore_exn_delayed (fun () -> Lwt_unix.close sock))
+      ) [%lwt.finally (ignore_exn_delayed (fun () -> Lwt_unix.close sock))]
   in
   (* Log unexpected exceptions *)
-  Lwt_main.run
-    (Lwt.catch t
-       (fun e ->
-          let%lwt () = Lwt_log.fatal_f "Caught unexpected exception: %s" (Printexc.to_string e) in
-          Lwt.fail e
-       )
-    );
+  Lwt_main.run (t ());
 
   `Ok ()
 
