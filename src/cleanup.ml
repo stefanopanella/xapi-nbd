@@ -22,7 +22,7 @@ module VBD = struct
   module StringSet = Set.Make(String)
 
   let cleanup_vbd rpc session_id vbd =
-    Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd >>= fun () ->
+    let%lwt () = Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd in
     Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd
 
   module Runtime = struct
@@ -30,11 +30,11 @@ module VBD = struct
     let vbds_to_clean_up_mutex = Lwt_mutex.create ()
 
     let with_tracking rpc session_id vbd f =
-      Lwt_mutex.with_lock vbds_to_clean_up_mutex (fun () -> Lwt.wrap (fun () ->
-          vbds_to_clean_up := StringSet.add (API.Ref.string_of vbd) !vbds_to_clean_up))
-      >>= fun () ->
-      f ()
-      >>= fun () ->
+      let%lwt () =
+        Lwt_mutex.with_lock vbds_to_clean_up_mutex (fun () -> Lwt.wrap (fun () ->
+            vbds_to_clean_up := StringSet.add (API.Ref.string_of vbd) !vbds_to_clean_up))
+      in
+      let%lwt () = f () in
       Lwt_mutex.with_lock vbds_to_clean_up_mutex (fun () ->
           vbds_to_clean_up := StringSet.remove (API.Ref.string_of vbd) !vbds_to_clean_up; 
           Lwt.return_unit)
@@ -44,11 +44,11 @@ module VBD = struct
        this does not cause a problem, because we ignore exceptions that happen
        during the cleanups. *)
     let cleanup rpc session_id =
-      Lwt_log.notice_f "Checking if there are any VBDs to clean up that leaked during runtime" >>= fun () ->
+      let%lwt () = Lwt_log.notice_f "Checking if there are any VBDs to clean up that leaked during runtime" in
       StringSet.elements !vbds_to_clean_up
       |> Lwt_list.iter_s (fun vbd ->
           ignore_exn_log_error (Printf.sprintf "Caught exception while cleaning up VBD with ref %s" vbd) (fun () ->
-              Lwt_log.warning_f "Cleaning up VBD with ref %s" vbd >>= fun () ->
+              let%lwt () = Lwt_log.warning_f "Cleaning up VBD with ref %s" vbd in
               cleanup_vbd rpc session_id (API.Ref.of_string vbd))
         )
   end
@@ -69,7 +69,7 @@ module VBD = struct
           (fun () -> a)
           b
           (fun e ->
-             Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd >>= fun () ->
+             let%lwt () = Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd in
              Lwt.fail e)
       in
       Xen_api.VBD.get_uuid ~rpc ~session_id ~self:vbd >>*= fun vbd_uuid ->
@@ -79,22 +79,23 @@ module VBD = struct
         (fun () -> Vbd_store.remove vbd_uuid)
 
     let cleanup rpc session_id =
-      Lwt_log.notice_f "Checking if there are any VBDs to clean up that leaked during the previous run" >>= fun () ->
-      Vbd_store.get_all () >>= fun vbd_uuids ->
+      let%lwt () = Lwt_log.notice_f "Checking if there are any VBDs to clean up that leaked during the previous run" in
+      let%lwt vbd_uuids = Vbd_store.get_all () in
       Lwt_list.iter_s
         (fun uuid ->
            ignore_exn_log_error (Printf.sprintf "Caught exception while cleaning up VBD with UUID %s" uuid) (fun () ->
-               Lwt_log.warning_f "Cleaning up VBD with UUID %s" uuid >>= fun () ->
-               Lwt.catch
-                 (fun () ->
-                    Xen_api.VBD.get_by_uuid ~rpc ~session_id ~uuid >>= fun vbd ->
-                    cleanup_vbd rpc session_id vbd)
-                 (function
-                   | Api_errors.Server_error (e, _) when e = Api_errors.uuid_invalid ->
-                     (* This VBD has already been cleaned up, maybe by the signal handler *)
-                     Lwt.return_unit
-                   | e -> Lwt.fail e)
-               >>= fun () ->
+               let%lwt () = Lwt_log.warning_f "Cleaning up VBD with UUID %s" uuid in
+               let%lwt () =
+                 Lwt.catch
+                   (fun () ->
+                      let%lwt vbd = Xen_api.VBD.get_by_uuid ~rpc ~session_id ~uuid in
+                      cleanup_vbd rpc session_id vbd)
+                   (function
+                     | Api_errors.Server_error (e, _) when e = Api_errors.uuid_invalid ->
+                       (* This VBD has already been cleaned up, maybe by the signal handler *)
+                       Lwt.return_unit
+                     | e -> Lwt.fail e)
+               in
                Vbd_store.remove uuid
              )
         )
@@ -102,22 +103,21 @@ module VBD = struct
   end
 
   let with_vbd ~vDI ~vM ~mode ~rpc ~session_id f =
-    Xen_api.VBD.create ~rpc ~session_id ~vM ~vDI ~userdevice:"autodetect" ~bootable:false ~mode ~_type:`Disk ~unpluggable:true ~empty:false ~other_config:[] ~qos_algorithm_type:"" ~qos_algorithm_params:[]
-    >>= fun vbd ->
+    let%lwt vbd = Xen_api.VBD.create ~rpc ~session_id ~vM ~vDI ~userdevice:"autodetect" ~bootable:false ~mode ~_type:`Disk ~unpluggable:true ~empty:false ~other_config:[] ~qos_algorithm_type:"" ~qos_algorithm_params:[] in
     Persistent.with_tracking rpc session_id vbd (fun () ->
         Runtime.with_tracking rpc session_id vbd (fun () ->
             Lwt.finalize
               (fun () ->
-                 Lwt_log.notice_f "Plugging VBD %s" (API.Ref.string_of vbd) >>= fun () ->
-                 Xen_api.VBD.plug ~rpc ~session_id ~self:vbd >>= fun () ->
+                 let%lwt () = Lwt_log.notice_f "Plugging VBD %s" (API.Ref.string_of vbd) in
+                 let%lwt () = Xen_api.VBD.plug ~rpc ~session_id ~self:vbd in
                  Lwt.finalize
                    (fun () -> f vbd)
                    (fun () ->
-                      Lwt_log.notice_f "Unplugging VBD %s" (API.Ref.string_of vbd) >>= fun () ->
+                      let%lwt () = Lwt_log.notice_f "Unplugging VBD %s" (API.Ref.string_of vbd) in
                       Xen_api.VBD.unplug ~rpc ~session_id ~self:vbd)
               )
               (fun () ->
-                 Lwt_log.notice_f "Destroying VBD %s" (API.Ref.string_of vbd) >>= fun () ->
+                 let%lwt () = Lwt_log.notice_f "Destroying VBD %s" (API.Ref.string_of vbd) in
                  Xen_api.VBD.destroy ~rpc ~session_id ~self:vbd
               )
           )
@@ -131,9 +131,10 @@ module Block = struct
 
     let with_tracking b f =
       let block_uuid = Uuidm.v `V4 |> Uuidm.to_string in
-      Lwt_mutex.with_lock blocks_to_close_mutex (fun () ->
-          Hashtbl.add blocks_to_close block_uuid b; Lwt.return_unit)
-      >>= fun () ->
+      let%lwt () =
+        Lwt_mutex.with_lock blocks_to_close_mutex (fun () ->
+            Hashtbl.add blocks_to_close block_uuid b; Lwt.return_unit)
+      in
       Lwt.finalize
         f
         (fun () ->
@@ -143,7 +144,7 @@ module Block = struct
 
     let cleanup () =
       let cleanup b = ignore_exn_log_error "Caught exception while closing open block device" (fun () ->
-          Lwt_log.warning_f "Disconnecting from block device" >>= fun () ->
+          let%lwt () = Lwt_log.warning_f "Disconnecting from block device" in
           Block.disconnect b)
       in
       let blocks_to_close = Hashtbl.fold (fun _ b l -> b::l) blocks_to_close [] in
@@ -151,8 +152,8 @@ module Block = struct
   end
 
   let with_block filename f =
-    Block.connect filename
-    >>= function
+    let%lwt res = Block.connect filename in
+    match res with
     | `Error e -> Lwt.fail_with (Printf.sprintf "Unable to read %s: %s" filename (Nbd.Block_error_printer.to_string e))
     | `Ok b ->
       Runtime.with_tracking b (fun () ->
@@ -165,12 +166,13 @@ end
 module Runtime = struct
   let cleanup_resources signal =
     let cleanup () =
-      Lwt_log.warning_f "Caught signal %d, cleaning up" signal >>= fun () ->
+      let%lwt () = Lwt_log.warning_f "Caught signal %d, cleaning up" signal in
       (* First we have to close the open file descriptors corresponding to the
          VDIs we plugged to dom0. Otherwise the VDI.unplug call would hang. *)
-      ignore_exn_log_error "Caught exception while closing open block devices" (fun () ->
-          Block.Runtime.cleanup ())
-      >>= fun () ->
+      let%lwt () =
+        ignore_exn_log_error "Caught exception while closing open block devices" (fun () ->
+            Block.Runtime.cleanup ())
+      in
       ignore_exn_log_error "Caught exception while cleaning up VBDs" (fun () ->
           Local_xapi_session.with_session VBD.Runtime.cleanup
         )

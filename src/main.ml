@@ -28,30 +28,29 @@ let require_str name arg =
   require name (if arg = "" then None else Some arg)
 
 let with_attached_vdi vDI rpc session_id f =
-  Lwt_log.notice "Looking up control domain UUID in xensource inventory" >>= fun () ->
+  let%lwt () = Lwt_log.notice "Looking up control domain UUID in xensource inventory" in
   Inventory.inventory_filename := Consts.xensource_inventory_filename;
   let control_domain_uuid = Inventory.lookup Inventory._control_domain_uuid in
-  Lwt_log.notice "Found control domain UUID" >>= fun () ->
-  Xen_api.VM.get_by_uuid ~rpc ~session_id ~uuid:control_domain_uuid
-  >>= fun control_domain ->
+  let%lwt () = Lwt_log.notice "Found control domain UUID" in
+  let%lwt control_domain = Xen_api.VM.get_by_uuid ~rpc ~session_id ~uuid:control_domain_uuid in
   Cleanup.VBD.with_vbd ~vDI ~vM:control_domain ~mode:`RO ~rpc ~session_id (fun vbd ->
-      Xen_api.VBD.get_device ~rpc ~session_id ~self:vbd
-      >>= fun device ->
+      let%lwt device = Xen_api.VBD.get_device ~rpc ~session_id ~self:vbd in
       f ("/dev/" ^ device))
 
 let handle_connection fd tls_role =
 
   let with_session rpc uri f =
-    ( match Uri.get_query_param uri "session_id" with
-      | Some session_str ->
-        (* Validate the session *)
-        let session_id = API.Ref.of_string session_str in
-        Xen_api.Session.get_uuid ~rpc ~session_id ~self:session_id
-        >>= fun _ ->
-        Lwt.return session_id
-      | None ->
-        Lwt.fail_with "No session_id parameter provided"
-    ) >>= fun session_id ->
+    let%lwt session_id =
+      ( match Uri.get_query_param uri "session_id" with
+        | Some session_str ->
+          (* Validate the session *)
+          let session_id = API.Ref.of_string session_str in
+          let%lwt _ = Xen_api.Session.get_uuid ~rpc ~session_id ~self:session_id in
+          Lwt.return session_id
+        | None ->
+          Lwt.fail_with "No session_id parameter provided"
+      )
+    in
     f uri rpc session_id
   in
 
@@ -59,10 +58,8 @@ let handle_connection fd tls_role =
   let serve t uri rpc session_id =
     let path = Uri.path uri in (* note preceeding / *)
     let vdi_uuid = if path <> "" then String.sub path 1 (String.length path - 1) else path in
-    Xen_api.VDI.get_by_uuid ~rpc ~session_id ~uuid:vdi_uuid
-    >>= fun vdi_ref ->
-    Xen_api.VDI.get_record ~rpc ~session_id ~self:vdi_ref
-    >>= fun vdi_rec ->
+    let%lwt vdi_ref = Xen_api.VDI.get_by_uuid ~rpc ~session_id ~uuid:vdi_uuid in
+    let%lwt vdi_rec = Xen_api.VDI.get_record ~rpc ~session_id ~self:vdi_ref in
     with_attached_vdi vdi_ref rpc session_id
       (fun filename ->
          Cleanup.Block.with_block filename (Nbd_lwt_unix.Server.serve t ~read_only:true (module Block))
@@ -89,12 +86,11 @@ let init_tls_get_server_ctx ~certfile ~ciphersuites =
 
 let xapi_says_use_tls () =
   let refuse log msg = (
-    log msg >>=
-    (fun () -> Lwt.fail_with msg)
+    let%lwt () = log msg in
+    Lwt.fail_with msg
   ) in
   let ask_xapi rpc session_id =
-    Xen_api.Network.get_all_records ~rpc ~session_id >>=
-    fun all_nets ->
+    let%lwt all_nets = Xen_api.Network.get_all_records ~rpc ~session_id in
     let all_porpoises = List.map (fun (_str, net) -> net.API.network_purpose) all_nets |>
     List.flatten in
     let tls = List.mem `nbd all_porpoises in
@@ -109,37 +105,34 @@ let xapi_says_use_tls () =
 
 let main port certfile ciphersuites =
   let t () =
-    Lwt_log.notice_f "Starting xapi-nbd: port = '%d'; certfile = '%s'; ciphersuites = '%s'" port certfile ciphersuites >>= fun () ->
+    let%lwt () = Lwt_log.notice_f "Starting xapi-nbd: port = '%d'; certfile = '%s'; ciphersuites = '%s'" port certfile ciphersuites in
     (* We keep a persistent record of the VBDs that we've created but haven't
        yet cleaned up. At startup we go through this list in case some VBDs
        got leaked after the previous run due to a crash and clean them up. *)
-    Cleanup.Persistent.cleanup () >>= fun () ->
-    Lwt_log.notice "Initialising TLS" >>= fun () ->
+    let%lwt () = Cleanup.Persistent.cleanup () in
+    let%lwt () = Lwt_log.notice "Initialising TLS" in
     let tls_server_role = init_tls_get_server_ctx ~certfile ~ciphersuites in
     let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
     Lwt.finalize
       (fun () ->
-         Lwt_log.notice "Setting up server socket" >>= fun () ->
+         let%lwt () = Lwt_log.notice "Setting up server socket" in
          Lwt_unix.setsockopt sock Lwt_unix.SO_REUSEADDR true;
          let sockaddr = Lwt_unix.ADDR_INET(Unix.inet_addr_any, port) in
          Lwt_unix.bind sock sockaddr;
          Lwt_unix.listen sock 5;
-         Lwt_log.notice "Listening for incoming connections" >>= fun () ->
+         let%lwt () = Lwt_log.notice "Listening for incoming connections" in
          let rec loop () =
-           Lwt_unix.accept sock
-           >>= fun (fd, _) ->
-           Lwt_log.notice "Got new client" >>= fun () ->
+           let%lwt (fd, _) = Lwt_unix.accept sock in
+           let%lwt () = Lwt_log.notice "Got new client" in
            (* Background thread per connection *)
            let _ =
              ignore_exn_log_error "Caught exception while handling client"
                (fun () ->
                   Lwt.finalize
                     (fun () -> (
-                      xapi_says_use_tls () >>=
-                      fun tls -> (
-                        let tls_role = if tls then tls_server_role else None in
-                        handle_connection fd tls_role)
-                      )
+                      let%lwt tls = xapi_says_use_tls () in
+                      let tls_role = if tls then tls_server_role else None in
+                      handle_connection fd tls_role)
                     )
                     (* ignore the exception resulting from double-closing the socket *)
                     (ignore_exn_delayed (fun () -> Lwt_unix.close fd))
@@ -155,7 +148,7 @@ let main port certfile ciphersuites =
   Lwt_main.run
     (Lwt.catch t
        (fun e ->
-          Lwt_log.fatal_f "Caught unexpected exception: %s" (Printexc.to_string e) >>= fun () ->
+          let%lwt () = Lwt_log.fatal_f "Caught unexpected exception: %s" (Printexc.to_string e) in
           Lwt.fail e
        )
     );
