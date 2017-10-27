@@ -149,6 +149,7 @@ let main port certfile ciphersuites =
                       inc_conn () >>=
                       xapi_says_use_tls >>=
                       fun tls -> (
+                        Lwt_log.notice (if tls then "using TLS" else "NOT using TLS") >>= fun () ->
                         let tls_role = if tls then tls_server_role else None in
                         handle_connection fd tls_role)
                       )
