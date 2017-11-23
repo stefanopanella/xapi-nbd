@@ -217,9 +217,10 @@ let setup_logging () =
 let () =
   (* We keep track of the VBDs we've created but haven't yet cleaned up, and
      when we receive a SIGTERM or SIGINT signal, we clean up these leftover
-     VBDs first and then fail with an exception. *)
-  Cleanup.Runtime.register_signal_handler ();
-  setup_logging ();
-  match Term.eval cmd with
-  | `Error _ -> exit 1
-  | _ -> exit 0
+     VBDs first. *)
+  Cleanup.Runtime.with_signal_handler (fun () ->
+    setup_logging ();
+    match Term.eval cmd with
+    | `Error _ -> exit 1
+    | _ -> exit 0
+  )

@@ -163,6 +163,8 @@ module Block = struct
 end
 
 module Runtime = struct
+  exception Caught_signal of int
+
   let cleanup_resources signal =
     let cleanup () =
       Lwt_log.warning_f "Caught signal %d, cleaning up" signal >>= fun () ->
@@ -177,13 +179,24 @@ module Runtime = struct
     in
 
     Lwt_main.run (cleanup ());
-    failwith (Printf.sprintf "Caught signal %d" signal)
+    raise (Caught_signal signal)
 
   let register_signal_handler () =
     let signals = [ Sys.sigint; Sys.sigterm ] in
     List.iter
       (fun s -> Lwt_unix.on_signal s cleanup_resources |> ignore)
       signals
+
+  let with_signal_handler f =
+    try
+      register_signal_handler ();
+      f ()
+    with
+    | Caught_signal signal as e ->
+      (* We do not fail with an exception when we get a SIGTERM,
+         as this is the signal systemd uses to stop the process,
+         so this is normal behavior. *)
+      if signal <> Sys.sigterm then raise e
 end
 
 module Persistent = struct

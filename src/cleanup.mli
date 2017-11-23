@@ -47,15 +47,20 @@ module Block : sig
 end
 
 module Runtime : sig
-  val register_signal_handler : unit -> unit
-  (** Register a signal handler for SIGTERM and SIGINT, to clean up the
-      leftoveer VBDs that we've created but haven't yet cleaned up during
-      the runtime of the program.
+  exception Caught_signal of int
+
+  val with_signal_handler : (unit -> unit) -> unit
+  (** Register a signal handler for SIGTERM and SIGINT before f is
+      started, to clean up the leftover VBDs that we've created but
+      haven't yet cleaned up during the runtime of f.
       If an exception happens while cleaning up a VBD, it is just logged, but
       not propagated to the caller, and will not interrupt the cleanup of the
       rest of the VBDs.
-      When the cleanup is finished, the handler raises an exception to
-      terminate the program.
+      This function should be called at the very beginning of the program
+      [f], and should wrap it completely. When the cleanup is finished,
+      the program is terminated. In case of SIGINT,
+      {!exception:Caught_signal} will be raised, and in case of SIGTERM,
+      the program will be terminated without an exception.
   *)
 end
 
