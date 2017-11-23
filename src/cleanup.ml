@@ -188,15 +188,11 @@ module Runtime = struct
       signals
 
   let with_signal_handler f =
+    Lwt.async_exception_hook := (fun e -> prerr_endline @@ Printexc.to_string e);
     try
       register_signal_handler ();
       f ()
-    with
-    | Caught_signal signal as e ->
-      (* We do not fail with an exception when we get a SIGTERM,
-         as this is the signal systemd uses to stop the process,
-         so this is normal behavior. *)
-      if signal <> Sys.sigterm then raise e
+    with _ -> ()
 end
 
 module Persistent = struct
