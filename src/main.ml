@@ -18,6 +18,21 @@ module Xen_api = Xen_api_lwt_unix
 
 module SM = Storage_interface.StorageAPI(Rpc_lwt.GenClient ())
 
+(* TODO remove this when we get the newer version of xcp-idl, which has this helper *)
+(** Separates the implementations of the given backend returned from
+    the VDI.attach2 SMAPIv2 call based on their type *)
+let implementations_of_backend backend =
+  List.fold_left
+    (fun (xendisks, blockdevices, files, nbds) implementation ->
+       match implementation with
+       | Storage_interface.XenDisk xendisk -> (xendisk::xendisks, blockdevices, files, nbds)
+       | BlockDevice blockdevice -> (xendisks, blockdevice::blockdevices, files, nbds)
+       | File file -> (xendisks, blockdevices, file::files, nbds)
+       | Nbd nbd -> (xendisks, blockdevices, files, nbd::nbds)
+    )
+    ([], [], [], [])
+    backend.Storage_interface.implementations
+
 let rpc =
   let (>>*=) m f = m >>= function
     | `Ok x -> f x
@@ -100,7 +115,7 @@ let handle_connection fd tls_role =
     let read_only = not (is_read_write uri) || vdi_rec.API.vDI_read_only in
     with_attached_vdi sr vdi (not read_only)
       (fun backend ->
-         let _xendisks, blockdevs, files, nbds = Storage_interface.implementations_of_backend backend in
+         let _xendisks, blockdevs, files, nbds = implementations_of_backend backend in
          match files, blockdevs, nbds with
          | {Storage_interface.path}::_, _, _ | _, {Storage_interface.path}::_, _ ->
            Cleanup.Block.with_block path (Nbd_lwt_unix.Server.serve t ~read_only (module Block))
